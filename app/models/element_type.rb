@@ -1,0 +1,3 @@
+class ElementType < ApplicationRecord
+
+end
