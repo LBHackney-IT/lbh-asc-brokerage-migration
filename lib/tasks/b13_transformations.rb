@@ -6,17 +6,17 @@ require 'active_support'
 ### Extract ###
 # Loads from B13 spreadsheet
 class B13SourceSpreadsheet
-	def initialize(yield_header: false, filename:, sheet:, header_search:, progress_bar:)
-		@filename = filename
+	def initialize(yield_header: false, spreadsheet:, sheet:, header_search:, progress_bar:, rejections:)
+		@spreadsheet = spreadsheet
 		@default_sheet = sheet
 		@header_search = header_search
 		@yield_header = yield_header
 		@progress_bar = progress_bar
+		@rejections = rejections
 	end
 
 	def each
-		spreadsheet = Roo::Excelx.new @filename
-		sheet = spreadsheet.sheet(@default_sheet)
+		sheet = @spreadsheet.sheet(@default_sheet)
 
 		headers = Hash.new
 
@@ -28,6 +28,7 @@ class B13SourceSpreadsheet
 				# search for header phrase
 				if row.include? @header_search
 					headers = row
+					# @rejections.write(headers)
 					if(@yield_header)
 						yield(headers)
 					end
@@ -42,16 +43,16 @@ class B13SourceSpreadsheet
 				}
 				yield row_hash
 			end
-
 		end
 	end
 end
 
 ### Transform ###
 # Only adds entries with mosaic ID given
-class TransformDropIfMosaicNotInt
-	def initialize(mosaic_col:)
+class TransformRejectIfMosaicNotInt
+	def initialize(mosaic_col:, rejections:)
 		@mosaic_col = mosaic_col
+		@rejections = rejections
 	end
 	def process(row)
 		if(!@headers_written)
@@ -66,6 +67,8 @@ class TransformDropIfMosaicNotInt
 				if bd.frac == BigDecimal("0")
 					return row
 				else
+					@rejections.write row.merge({ reason: 'Rejected as mosaic not int'})
+
 					return nil
 				end
 			end
@@ -81,10 +84,12 @@ class TransformCleanUnits
 	end
 	def process(row)
 		case row[@unit_col].to_s.downcase
-		when 'days'
-			row[@unit_col] = 'day'
+		when 'days', 'day', 'nights'
+			row[@unit_col] = 'daily'
 		when 'unit of measure', 'units'
 			row[@unit_col] = 'unit'
+		when 'meal'
+			row[@unit_col] = 'meal'
 		when 'hours'
 			row[@unit_col] = 'hour'
 		when 'other one off payment'
@@ -93,6 +98,65 @@ class TransformCleanUnits
 			row[@unit_col] = 'unspecified'
 		end
 		row
+	end
+end
+
+# If there is no CEDAR number provided, search for it elsewhere in sheet
+class TransformProviderCedar
+	def initialize(spreadsheet:, sheet:, header_search:, cedar_col:, provider_col:)
+		@spreadsheet = spreadsheet
+		@sheet = sheet.to_s
+		@cedar_col = cedar_col
+		@provider_col = provider_col
+		@header_search = header_search
+		@@provider_cache = Hash.new
+	end
+	def process(row)
+		if(!@headers_written)
+			@headers_written = true
+			return row
+		else
+			# if there is a Provider string but no cedar code
+			if row[@cedar_col].blank? && !row[@provider_col].blank?
+				row[@cedar_col] = get_cedar row[@provider_col]
+			end
+		end
+		row
+	end
+	def get_cedar(provider_name)
+		# if no cache, set it up
+		if @@provider_cache.empty?
+			found_headers = false
+			sheet = @spreadsheet.sheet(@sheet)
+			provider_index, cedar_index = -1
+			(1..sheet.last_row).each do | rowNum |
+				row = sheet.row(rowNum)
+
+				# find location of cedars and providers
+				if !found_headers
+					if row.include? @header_search
+						provider_index = row.index @provider_col
+						cedar_index = row.index @cedar_col
+						found_headers = true
+					end
+				else
+					# check there is both provider and cedar, and cedar is numeric and over 0
+					if !(row[provider_index].nil? || row[provider_index].empty?) &&
+						 !(row[cedar_index].nil?) &&
+						 row[cedar_index].is_a?(Numeric) &&
+						 row[cedar_index] > 0
+						if !@@provider_cache.key? row[provider_index]
+							@@provider_cache[row[provider_index]] = [row[cedar_index].to_i]
+						else
+							@@provider_cache[row[provider_index]].append[row[cedar_index].to_i]
+						end
+					end
+				end
+			end
+		end
+
+		# return cache
+		return @@provider_cache[provider_name]
 	end
 end
 
@@ -115,8 +179,9 @@ class TransformElementCostType
 	end
 end
 
-class TransformParseCostCentre
-	def initialize
+class TransformRejectParseCostCentre
+	def initialize(rejections:)
+		@rejections = rejections
 	end
 	def process(row)
 		cost_code = row['Budget/Subjective Code']
@@ -139,6 +204,7 @@ class TransformParseCostCentre
 			end
 		end
 		# we don't want anything without a cost code
+		@rejections.write row.merge({reason: 'Rejected parse cost centre'})
 		nil
 	end
 end
@@ -146,9 +212,10 @@ end
 ### Load ###
 # Loads the components into an output CSV
 class OutputCSV
-	def initialize(filename:)
+	def initialize(filename:, progress_bar: nil)
 		@filename = filename
 		@csv = CSV.open(filename, 'w')
+		@progress_bar = progress_bar
 	end
 
 	def write(row)
@@ -157,84 +224,13 @@ class OutputCSV
 			@csv << row
 		else
 			@csv << row.values
+			if(@progress_bar)
+				@progress_bar.increment
+			end
 		end
 	end
 
 	def close
 		@csv.close
-	end
-end
-
-### Load ###
-# Loads the components into a DB
-class OutputActiveRecords
-	def initialize(progress_bar:)
-		@progress_bar = progress_bar
-	end
-
-	def write(row)
-		if !@headers_written
-			@headers_written = true
-		else
-			# Get the provider, if there is one provided
-			provider = (row.key? 'Provider') ? Provider.find_or_create_by(
-				name: row['Provider'],
-				type: :spot,
-				address: 'eg'
-			) : nil
-
-			service_group = Service.find_by name: row['Service Group']
-			if !service_group
-				service_group = Service.new
-				service_group.name = row['Service Group']
-				service_group.id = Service.maximum(:id).to_i.next
-				service_group.position = 1
-				service_group.save!
-			end
-
-			element_type = ElementType.find_by name: row['Service Type']
-			if !element_type
-				element_type = ElementType.new
-				element_type.name = row['Service Type']
-				element_type.id = ElementType.maximum(:id).to_i.next
-				element_type.service_id = service_group.id
-				element_type.cost_type = row['Cycle']
-				element_type.position = 1
-				element_type.save!
-			end
-
-			element = Element.new
-			element.element_type = element_type
-
-			element.social_care_id = row['Mosaic ID']
-
-			element.provider = provider
-			# element.non_personal_budget = ??
-
-			# element.payee			= row['Payee'] if row.key? 'Payee'
-			element.cost 			= row['Amount'] if row.key? 'Amount'
-			element.quantity 	= row['Qty'] if row.key? 'Qty'
-
-			# element.cost_centre = row[:cost_centre]
-			# element.cost_subjective = row[:cost_subjective]
-			# element.cost_analysis = row[:cost_analysis]
-
-			element.start_date  = row['Start Date']
-			element.end_date 		= row['End Date']
-
-			element.non_personal_budget = true
-
-			element.details = 'Details'
-
-			# if row.key? 'Cycle'
-			# 	element.cycle = row['Cycle']
-			# 	element.unit = row['Unit'].downcase if row.key? 'Unit'
-			# end
-			element.save!
-			@progress_bar.increment
-		end
-	end
-
-	def close
 	end
 end

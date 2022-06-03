@@ -121,6 +121,31 @@ class InitialSchema < ActiveRecord::Migration[7.0]
     #   t.date :created_at
     #   t.date :updated_at
     # end
+    #
+
+    # execute <<~SQL
+    # CREATE TYPE audit_event_type AS ENUM (
+    #   'referral_broker_assignment',
+    #   'referral_broker_reassignment',
+    #   'element_ended',
+    #   'element_cancelled',
+    #   'element_suspended',
+    #   'care_package_ended',
+    #   'care_package_cancelled',
+    #   'care_package_suspended',
+    #   'referral_archived',
+    #   'import_note'
+    # );
+    # SQL
+    
+    # create_table :audit_events
+    #   t.string :social_care_id, limit: 100
+    #   t.text :message
+    #   t.column :event_type, 'audit_event_type'
+    #   t.text :metadata
+    #   t.date :created_at
+    #   t.integer :user_id
+    # end
 
   end
 end

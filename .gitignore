@@ -7,6 +7,12 @@
 # Ignore bundler config.
 /.bundle
 
+# Mac files
+/.DS_Store
+
+# Ignore IDE stuff
+/.idea
+
 # Ignore the default SQLite database.
 /db/*.sqlite3
 /db/*.sqlite3-*
@@ -35,5 +41,7 @@
 /config/master.key
 
 out/*
-B13*.xlsx
+
+# Don't add any spreadsheets
+*.xlsx
 
