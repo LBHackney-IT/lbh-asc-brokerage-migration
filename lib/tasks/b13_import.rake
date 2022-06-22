@@ -67,6 +67,12 @@ namespace :b13 do
         # note: "Finance Client Data 21-22"
         #       only contained PO (purchase orders?) that did not
         #       match any known CEDAR IDs when doing a cursory search
+        'B13_26_09_20': {
+          '27_09_2020_21_06': {
+            supplier: 'Provider',
+            cedar: 'CEDAR number (Supplier Id)'
+          }
+        },
         'Residential Payment Tracker 22-23': {
           'Residential Tracker 22-23': {
             supplier: 'Supplier',
@@ -183,6 +189,12 @@ namespace :b13 do
     by_cedar_csv << list_sheets_row
     by_cedar_csv << list_tabs_row
 
+    # count different values in the row
+    def different_value_count(row)
+      row = row.drop(2).uniq
+      row.size - row.count(nil)
+    end
+
     # provider by cedar first
     provider_by_cedar.each do | cedar_code, matches |
       row = []
@@ -192,12 +204,15 @@ namespace :b13 do
       end
 
       # count empty cells
-      row[1] = row.size - row.count(nil) - 1
+      row[1] = different_value_count row
       by_cedar_csv << row
     end
     by_cedar_csv.close
 
     by_name_csv = CSV.open('./out/provider_by_name_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
+    by_name_csv << list_sheets_row
+    list_tabs_row[0] = 'Provider Name ⬇️'
+    by_name_csv << list_tabs_row
 
     # now process provider by provider name
     provider_by_name.each do | provider_name, matches |
@@ -208,7 +223,7 @@ namespace :b13 do
       end
 
       # count empty cells
-       row[1] = row.size - row.count(nil) - 1
+      row[1] = different_value_count row
       by_name_csv << row
     end
     by_name_csv.close
