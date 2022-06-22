@@ -2,6 +2,7 @@ require 'csv'
 require 'roo'
 require 'bigdecimal'
 require 'active_support'
+require_relative './find_headers'
 
 ### Extract ###
 # Loads from B13 spreadsheet
@@ -22,27 +23,21 @@ class B13SourceSpreadsheet
 
 		@progress_bar.set_total(sheet.last_row)
 
-		(1..sheet.last_row).each do | rowNum |
+		start_row, headers = FindHeaders.find(sheet: sheet, header_search: @header_search)
+		if(@yield_header)
+			yield(headers)
+		end
+
+		((start_row + 1)..sheet.last_row).each do | rowNum |
 			row = sheet.row(rowNum)
-			if headers.empty?
-				# search for header phrase
-				if row.include? @header_search
-					headers = row
-					# @rejections.write(headers)
-					if(@yield_header)
-						yield(headers)
-					end
+			# map the headers array into a hash of the row results
+			row_hash = Hash.new
+			headers.each_with_index { | header, col |
+				if(header)
+					row_hash[header] = row[col]
 				end
-			else
-				# map the headers array into a hash of the row results
-				row_hash = Hash.new
-				headers.each_with_index { | header, col |
-					if(header)
-						row_hash[header] = row[col]
-					end
-				}
-				yield row_hash
-			end
+			}
+			yield row_hash
 		end
 	end
 end
@@ -101,6 +96,31 @@ class TransformCleanUnits
 	end
 end
 
+class TransformElementFNCC
+	def initialize
+
+	end
+	def process(row)
+
+		row
+	end
+end
+
+# replaces any weird unicode non breaking spaces with a plain ' '
+class TransformCleanNBSP
+	def initialize
+	end
+	def process(row)
+		row.map do |key, value|
+			if value.is_a? String
+				value = value.gsub(/[[:space:]]/, ' ')
+			end
+			[key, value]
+		end
+		row.to_h
+	end
+end
+
 # If there is no CEDAR number provided, search for it elsewhere in sheet
 class TransformProviderCedar
 	def initialize(spreadsheet:, sheet:, header_search:, cedar_col:, provider_col:)
@@ -126,30 +146,25 @@ class TransformProviderCedar
 	def get_cedar(provider_name)
 		# if no cache, set it up
 		if @@provider_cache.empty?
-			found_headers = false
 			sheet = @spreadsheet.sheet(@sheet)
-			provider_index, cedar_index = -1
-			(1..sheet.last_row).each do | rowNum |
-				row = sheet.row(rowNum)
 
-				# find location of cedars and providers
-				if !found_headers
-					if row.include? @header_search
-						provider_index = row.index @provider_col
-						cedar_index = row.index @cedar_col
-						found_headers = true
-					end
-				else
-					# check there is both provider and cedar, and cedar is numeric and over 0
-					if !(row[provider_index].nil? || row[provider_index].empty?) &&
-						 !(row[cedar_index].nil?) &&
-						 row[cedar_index].is_a?(Numeric) &&
-						 row[cedar_index] > 0
-						if !@@provider_cache.key? row[provider_index]
-							@@provider_cache[row[provider_index]] = [row[cedar_index].to_i]
-						else
-							@@provider_cache[row[provider_index]].append[row[cedar_index].to_i]
-						end
+			start_row, headers = FindHeaders.find(sheet: sheet, header_search: @header_search)
+
+			# find location of cedars and providers
+			provider_index = headers.index @provider_col
+			cedar_index = headers.index @cedar_col
+
+			(1..(start_row+1).last_row).each do | rowNum |
+				row = sheet.row(rowNum)
+				# check there is both provider and cedar, and cedar is numeric and over 0
+				if !(row[provider_index].nil? || row[provider_index].empty?) &&
+					 !(row[cedar_index].nil?) &&
+					 row[cedar_index].is_a?(Numeric) &&
+					 row[cedar_index] > 0
+					if !@@provider_cache.key? row[provider_index]
+						@@provider_cache[row[provider_index]] = [row[cedar_index].to_i]
+					else
+						@@provider_cache[row[provider_index]].append[row[cedar_index].to_i]
 					end
 				end
 			end
@@ -206,6 +221,20 @@ class TransformRejectParseCostCentre
 		# we don't want anything without a cost code
 		@rejections.write row.merge({reason: 'Rejected parse cost centre'})
 		nil
+	end
+end
+
+class TransformAddDefaults
+	def initialize(default_values:)
+		@default_values = default_values
+	end
+	def process(row)
+		@default_values.each do | default_name, default_value |
+			if !row.has_key? default_name
+				row[default_name] = default_value
+			end
+		end
+		row
 	end
 end
 

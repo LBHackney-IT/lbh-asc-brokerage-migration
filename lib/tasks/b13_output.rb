@@ -1,14 +1,23 @@
 # Loads the components into a DB
-class   OutputActiveRecords
-  def initialize(progress_bar:, column_mappings:)
+class OutputActiveRecords
+  def initialize(progress_bar:, column_mappings:, replacements:)
     @progress_bar = progress_bar
     @column_mappings = column_mappings
+    @replacements = replacements
   end
 
   def write(row)
     if !@headers_written
       @headers_written = true
     else
+      # look up element to see if it exists yet
+      # attempts to match by social_care_id and start_date and cost
+      element = Element.find_by( {
+        social_care_id:   row[@column_mappings[:mosaic_id]],
+        start_date:       row[@column_mappings[:start_date]],
+        cost:             row[@column_mappings[:amount]]
+      })
+
       # find cedar. if its in an array, its been found from a cache
       cedar_number = row[@column_mappings[:cedar]]
       if cedar_number.is_a? Array
@@ -18,7 +27,7 @@ class   OutputActiveRecords
             social_care_id: row[@column_mappings[:mosaic_id]],
             message: 'Provider matches multiple CEDAR ids - chose the first available from ' + cedar_number.join(','),
             event_type: 'import_note',
-            metadata: '',
+            metadata: {:cedars => cedar_number},
             user_id: 0
           )
         end
@@ -45,10 +54,16 @@ class   OutputActiveRecords
         service_group.save!
       end
 
-      element_type = ElementType.find_by name: row[@column_mappings[:service_type]]
+      # see if the element name needs updating according to replacements
+      element_name = row[@column_mappings[:element_name]]
+      if @replacements.has_key? element_name
+        element_name = @replacements[element_name]
+      end
+
+      element_type = ElementType.find_by name: element_name
       if !element_type
         element_type = ElementType.new
-        element_type.name = row[@column_mappings[:service_type]]
+        element_type.name = element_name
         element_type.id = ElementType.maximum(:id).to_i.next
         element_type.service_id = service_group.id
         element_type.cost_type = row[@column_mappings[:cycle]]
@@ -56,13 +71,14 @@ class   OutputActiveRecords
         element_type.save!
       end
 
-      element = Element.new
+      if !element
+        element= Element.new
+      end
       element.element_type = element_type
 
       element.social_care_id = row[@column_mappings[:mosaic_id]].to_i
 
       element.provider = provider
-      # element.non_personal_budget = ??
 
       element.cost 			= row[@column_mappings[:amount]] if row.key? @column_mappings[:amount]
       element.quantity 	= row[@column_mappings[:quantity]] if row.key? @column_mappings[:quantity]
