@@ -63,6 +63,12 @@ namespace :b13 do
   desc 'Import provider data'
   task :etl_provider => :environment do | t, argv |
     argv.with_defaults(
+      provider_info: {
+        file: 'Suppliers Info HA (33)',
+        tab: 'Page1_1',
+        supplier: 'supplier name',
+        cedar: 'supplier reference'
+      },
       sheets_and_tabs: {
         # note: "Finance Client Data 21-22"
         #       only contained PO (purchase orders?) that did not
@@ -106,6 +112,18 @@ namespace :b13 do
         }
       }
     )
+
+    # load provider list
+    provider_list = {}
+    spreadsheet = Roo::Excelx.new argv['provider_info'][:file].to_s + '.xlsx'
+    sheet = spreadsheet.sheet argv['provider_info'][:tab].to_s
+    header_row_number, headers = FindHeaders.find(sheet: sheet, header_search: argv['provider_info'][:supplier])
+    supplier_index = headers.index argv['provider_info'][:supplier]
+    cedar_index = headers.index argv['provider_info'][:cedar]
+    ((header_row_number+1)..sheet.last_row).each do | rowNum |
+      row = sheet.row(rowNum)
+      provider_list[row[cedar_index].to_s.strip] = row[supplier_index].to_s.strip.downcase
+    end
 
     provider_by_name = {}
     provider_by_cedar = {}
@@ -172,13 +190,14 @@ namespace :b13 do
 
     # now convert these into a CSV
     by_cedar_csv = CSV.open('./out/provider_by_cedar_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
-    list_sheets_row = ['Sheets and Tabs ➡️', '']
-    list_tabs_row = ['CEDAR ⬇️', '# matches']
+    list_sheets_row = ['Sheets and Tabs ➡️', '', '']
+    list_tabs_row = ['CEDAR ⬇️', '# matches', 'supplier list match']
     cell_positions = [];
 
     argv['sheets_and_tabs'].each do | filename, tabs |
       list_sheets_row.append filename
       tabs.keys.each_with_index do | tab, i |
+        # add an empty cell on the sheets row if there is more than one tab
         if i > 0
           list_sheets_row.append ''
         end
@@ -191,7 +210,7 @@ namespace :b13 do
 
     # count different values in the row
     def different_value_count(row)
-      row = row.drop(2).uniq
+      row = row.drop(3).uniq
       row.size - row.count(nil)
     end
 
@@ -205,6 +224,9 @@ namespace :b13 do
 
       # count empty cells
       row[1] = different_value_count row
+
+      # look up cedar matches
+      row[2] = provider_list.fetch(format('%06d',cedar_code.to_i), '0')
       by_cedar_csv << row
     end
     by_cedar_csv.close
@@ -224,6 +246,9 @@ namespace :b13 do
 
       # count empty cells
       row[1] = different_value_count row
+
+      # look up cedar matches
+      row[2] = provider_list.key(provider_name.downcase)
       by_name_csv << row
     end
     by_name_csv.close
