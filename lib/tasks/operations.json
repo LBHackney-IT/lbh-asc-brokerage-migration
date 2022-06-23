@@ -1,0 +1,4 @@
+{
+  "engine": "{\"facets\":[],\"mode\":\"row-based\"}",
+  "clusterer": "{\"type\":\"binning\",\"function\":\"daitch-mokotoff\",\"column\":\"Provider Name\",\"params\":{}}"
+}

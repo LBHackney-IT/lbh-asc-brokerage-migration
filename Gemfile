@@ -36,6 +36,10 @@ gem 'kiba'
 gem "roo", "~> 2.9.0"
 gem 'bigdecimal'
 gem 'pg'
+gem 'httpclient'
+gem 'cgi'
+gem 'json'
+gem 'addressable'
 
 group :development, :test do
   # See https://guides.rubyonrails.org/debugging_rails_applications.html#debugging-with-the-debug-gem
