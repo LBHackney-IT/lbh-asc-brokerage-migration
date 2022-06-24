@@ -184,7 +184,7 @@ namespace :b13 do
     # now convert these into a CSV
     by_cedar_csv = CSV.open('./out/provider_by_cedar_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
     list_sheets_row = ['Sheets and Tabs ➡️', '', '']
-    list_tabs_row = ['CEDAR', '# matches', supplier list match']
+    list_tabs_row = ['CEDAR', '# matches', 'supplier list match']
     cell_positions = [];
 
     argv['sheets_and_tabs'].each do | filename, tabs |
