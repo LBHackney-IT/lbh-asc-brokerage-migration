@@ -7,6 +7,7 @@ require_relative 'progress_bar'
 require 'rake'
 require 'csv'
 require 'yaml'
+require_relative './refine'
 
 namespace :b13 do
   desc 'Drops the audit, element types, elements and provider tables'
@@ -50,14 +51,6 @@ namespace :b13 do
       end
     end
     File.write('element_replacements.yml', replacements.to_yaml)
-  end
-
-  desc 'Imports all three spreadsheet types, one after another, with values being assumed to be newer'
-  task :etl_all => :environment do | t, argv |
-    ['b13_historic', 'mosaic_historic'].each do |source_type|
-      Rake::Task["b13:etl"].invoke source_type
-      Rake::Task['b13:etl'].reenable
-    end
   end
 
   desc 'Import provider data'
@@ -173,7 +166,7 @@ namespace :b13 do
     # now convert these into a CSV
     by_cedar_csv = CSV.open('./out/provider_by_cedar_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
     list_sheets_row = ['Sheets and Tabs ➡️', '']
-    list_tabs_row = ['CEDAR ⬇️', '# matches']
+    list_tabs_row = ['CEDAR', '# matches']
     cell_positions = [];
 
     argv['sheets_and_tabs'].each do | filename, tabs |
@@ -211,7 +204,7 @@ namespace :b13 do
 
     by_name_csv = CSV.open('./out/provider_by_name_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
     by_name_csv << list_sheets_row
-    list_tabs_row[0] = 'Provider Name ⬇️'
+    list_tabs_row[0] = 'Provider Name'
     by_name_csv << list_tabs_row
 
     # now process provider by provider name
@@ -227,6 +220,50 @@ namespace :b13 do
       by_name_csv << row
     end
     by_name_csv.close
+  end
+
+  desc 'Clean provider data - requires open refine to be running on :3333'
+  task :etl_find_provider_clusters => :environment do | t, argv |
+
+    # find latest provider by name file
+    provider_by_name_file = Dir['./out/provider_by_name*.csv'].last
+    timestamp = Time.now.strftime("%d-%m-%Y.%H.%M.%S")
+    # create new open refine project
+    refine_project = Refine.new({
+        "project_name" => 'provider_clean_up_' + timestamp,
+        "file_name" => provider_by_name_file,
+        'options' => {
+          "encoding": "UTF-8",
+          "separator":",",
+          "ignoreLines":1,
+          "headerLines":1,
+          "skipDataLines":0,
+          "limit":-1,
+          "storeBlankRows": false,
+          "guessCellValueTypes":false,
+          "processQuotes": true,
+          "quoteCharacter": "\"",
+          "storeBlankCellsAsNulls": true,
+          "includeFileSources": false,
+          "includeArchiveFileName": false,
+          "trimStrings": true
+        }.to_json
+    })
+
+    clustering_instructions = File.open(File.join(Rails.root, "lib", "tasks", "operations.json")).read
+    File.write(
+      provider_by_name_file + '.clusters.json',
+      refine_project.call('compute-clusters', JSON.parse(clustering_instructions)).to_json
+    )
+
+  end
+
+  desc 'Imports all three spreadsheet types, one after another, with values being assumed to be newer'
+  task :etl_all => :environment do | t, argv |
+    ['b13_historic', 'mosaic_historic'].each do |source_type|
+      Rake::Task["b13:etl"].invoke source_type
+      Rake::Task['b13:etl'].reenable
+    end
   end
 
   desc 'Imports a spreadsheet file'
