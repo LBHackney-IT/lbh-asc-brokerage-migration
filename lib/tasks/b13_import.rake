@@ -295,6 +295,14 @@ namespace :b13 do
   task :etl, [:source_type] => :environment do | t, argv |
     source_type = argv['source_type'] || nil
 
+    # load cost code look up sheet
+    argv.with_defaults(
+      cost_code_lookup_filename: 'Finance Client Data 21-22.xlsx',
+      cost_codes_lookup_tab: 'Direct Payments',
+      cost_codes_lookup_code_col: 'PSR by CC',
+      cost_codes_lookup_service_uid: 'Service User ID'
+    )
+
     case source_type
     when 'b13_historic'
       # set some defaults
@@ -363,6 +371,7 @@ namespace :b13 do
       Kiba.parse do
         @progress_bar = ProgressBar.new(total: 1, description: 'Rows imported')
         spreadsheet = Roo::Excelx.new argv[:filename]
+        cost_codes_lookup_sheet = Roo::Excelx.new argv[:cost_code_lookup_filename]
         sheet = argv[:sheet]
         source B13SourceSpreadsheet,
                spreadsheet: spreadsheet,
@@ -374,14 +383,23 @@ namespace :b13 do
         transform TransformRejectIfMosaicNotInt, mosaic_col: argv[:header_search], rejections: @rejections
         transform TransformCleanUnits
         transform TransformElementFNCC
+
         transform TransformProviderCedar,
                   spreadsheet: spreadsheet,
                   sheet: sheet,
                   header_search: argv[:header_search],
                   cedar_col: column_mappings[:cedar],
                   provider_col: column_mappings[:provider]
+
         transform TransformElementCostType
-        transform TransformRejectParseCostCentre, rejections: rejections
+
+        transform TransformRejectParseCostCentre,
+                  rejections: rejections,
+                  cost_codes_lookup_sheet: argv[:cost_codes_lookup_sheet],
+                  cost_codes_lookup_tab: argv[:cost_codes_lookup_tab],
+                  cost_codes_lookup_code_col: argv[:cost_codes_lookup_code_col],
+                  cost_codes_lookup_service_uid_col: argv[:cost_codes_lookup_service_uid],
+                  mosaic_id_col: column_mappings[:mosaic_col]
 
         transform TransformAddDefaults,
                   default_values: default_values

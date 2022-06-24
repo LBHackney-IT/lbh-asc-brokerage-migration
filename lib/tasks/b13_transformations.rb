@@ -63,7 +63,6 @@ class TransformRejectIfMosaicNotInt
 					return row
 				else
 					@rejections.write row.merge({ reason: 'Rejected as mosaic not int'})
-
 					return nil
 				end
 			end
@@ -154,7 +153,7 @@ class TransformProviderCedar
 			provider_index = headers.index @provider_col
 			cedar_index = headers.index @cedar_col
 
-			(1..(start_row+1).last_row).each do | rowNum |
+			((start_row+1)..last_row).each do | rowNum |
 				row = sheet.row(rowNum)
 				# check there is both provider and cedar, and cedar is numeric and over 0
 				if !(row[provider_index].nil? || row[provider_index].empty?) &&
@@ -195,8 +194,21 @@ class TransformElementCostType
 end
 
 class TransformRejectParseCostCentre
-	def initialize(rejections:)
+	def initialize(rejections:,
+								 cost_codes_lookup_sheet:,
+								 cost_codes_lookup_tab:,
+								 cost_codes_lookup_code_col:,
+								 cost_codes_lookup_service_uid_col:,
+								 mosaic_id_col:)
 		@rejections = rejections
+
+		# look up cost code info
+		@@cost_code_cache = Hash.new
+		@cost_codes_lookup_sheet = cost_codes_lookup_sheet
+		@cost_codes_lookup_tab = cost_codes_lookup_tab
+		@cost_codes_lookup_code_col = cost_codes_lookup_code_col
+		@cost_codes_lookup_service_uid_col = cost_codes_lookup_service_uid_col
+		@mosaic_id_col = mosaic_id_col
 	end
 	def process(row)
 		cost_code = row['Budget/Subjective Code']
@@ -221,6 +233,35 @@ class TransformRejectParseCostCentre
 		# we don't want anything without a cost code
 		@rejections.write row.merge({reason: 'Rejected parse cost centre'})
 		nil
+	end
+	def get_missing_cost_code(service_uid)
+		# if no cache, set it up
+		if @@cost_code_cache.empty?
+			sheet = @cost_codes_lookup_sheet.sheet(@sheet)
+			start_row, headers = FindHeaders.find(sheet: sheet, header_search: @cost_codes_lookup_code_col)
+
+			# find location of cedars and providers
+			cost_code_index = headers.index @cost_codes_lookup_code_col
+			suid_index = headers.index @mosaic_id_col
+
+			((start_row+1)..last_row).each do | rowNum |
+				row = sheet.row(rowNum)
+
+				# check there is both service_uid and cost_code, and cost_code begins with the letter D
+				if !(row[cost_code_index].nil? || row[cost_code_index].empty?) &&
+					(row[cost_code_index].is_a? String && row[cost_code_index].strip == 'D') &&
+					!(row[suid_index].nil? || row[suid_index].empty?) &&
+					row[suid_index].is_a?(Numeric)
+
+					if !@@cost_code_cache.key? row[suid_index]
+						@@cost_code_cache[row[suid_index].to_i] = row[cost_code_index].to_s
+					end
+				end
+			end
+		end
+
+		# return cache
+		return @@cost_code_cache[service_uid]
 	end
 end
 
