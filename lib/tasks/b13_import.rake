@@ -63,7 +63,9 @@ namespace :b13 do
         file: 'Suppliers Info HA (33)',
         tab: 'Page1_1',
         supplier: 'supplier name',
-        cedar: 'supplier reference'
+        cedar: 'supplier reference',
+        site: 'address number',
+        address: ['address line 1',	'address line 2', 'address line 3', 'address line 4',	'address line 5',	'address line 6',	'postcode']
       },
       sheets_and_tabs: {
         # note: "Finance Client Data 21-22"
@@ -118,7 +120,6 @@ namespace :b13 do
 
     provider_by_name = {}
     provider_by_cedar = {}
-    p argv['sheets_and_tabs']
     argv['sheets_and_tabs'].each do | spreadsheet_filename, tabs |
       p 'Loading spreadsheet ' + spreadsheet_filename.to_s
       spreadsheet = Roo::Excelx.new spreadsheet_filename.to_s + '.xlsx'
@@ -177,7 +178,6 @@ namespace :b13 do
         end
       end
     end
-
 
     # now convert these into a CSV
     by_cedar_csv = CSV.open('./out/provider_by_cedar_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
@@ -251,6 +251,7 @@ namespace :b13 do
 
       # look up cedar matches
       row[2] = provider_list.key(provider_name.downcase)
+
       by_name_csv << row
 
       found_provider = false
@@ -309,7 +310,14 @@ namespace :b13 do
         }
       end
     end
+
+    File.write(
+      './out/provider_mapping.json',
+      JSON.pretty_generate(provider_matches)
+    )
     by_name_csv.close
+    provider_output_csv.close
+    provider_not_found_csv.close
   end
 
   desc 'Process Provider clarifications from Hackney'
@@ -616,7 +624,6 @@ namespace :b13 do
     headers_done = false
     results = ActiveRecord::Base.connection.execute("SELECT * FROM elements LEFT JOIN providers ON elements.provider_id = providers.id")
     results.each do | row |
-      p row
       if !headers_done
         export_file.write row.keys
         headers_done = true
