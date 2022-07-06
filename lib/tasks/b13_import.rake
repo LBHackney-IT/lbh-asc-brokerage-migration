@@ -8,6 +8,8 @@ require 'rake'
 require 'csv'
 require 'yaml'
 require_relative './refine'
+require 'fuzzy_match'
+require 'amatch'
 
 namespace :b13 do
   desc 'Drops the audit, element types, elements and provider tables'
@@ -60,7 +62,9 @@ namespace :b13 do
         file: 'Suppliers Info HA (33)',
         tab: 'Page1_1',
         supplier: 'supplier name',
-        cedar: 'supplier reference'
+        cedar: 'supplier reference',
+        site: 'address number',
+        address: ['address line 1',	'address line 2', 'address line 3', 'address line 4',	'address line 5',	'address line 6',	'postcode']
       },
       sheets_and_tabs: {
         # note: "Finance Client Data 21-22"
@@ -108,19 +112,55 @@ namespace :b13 do
 
     # load provider list
     provider_list = {}
+    provider_detail = {}
     spreadsheet = Roo::Excelx.new argv['provider_info'][:file].to_s + '.xlsx'
     sheet = spreadsheet.sheet argv['provider_info'][:tab].to_s
     header_row_number, headers = FindHeaders.find(sheet: sheet, header_search: argv['provider_info'][:supplier])
     supplier_index = headers.index argv['provider_info'][:supplier]
     cedar_index = headers.index argv['provider_info'][:cedar]
-    ((header_row_number+1)..sheet.last_row).each do | rowNum |
-      row = sheet.row(rowNum)
+    site_index = headers.index argv['provider_info'][:site]
+
+    provider_matches = {
+      exact: Hash.new,
+      guess: Hash.new
+    }
+
+    address_indices = [];
+    headers.each_with_index do |col, index|
+      if argv['provider_info'][:address].include? col
+        address_indices.append index
+      end
+    end
+
+    address_list = Hash.new
+
+    framework_providers = YAML.load_file('framework_providers.yml')
+    ((header_row_number+1)..sheet.last_row).each do | row_num |
+      row = sheet.row(row_num)
+      cedar_number = row[cedar_index].to_s.strip.to_i
+      provider_detail[row[cedar_index].to_s.strip] = {
+        name: row[supplier_index],
+        type: (framework_providers.include? row[supplier_index]) ? :framework : :spot,
+        is_archived: false,
+        created_at: DateTime.now,
+        updated_at: DateTime.now,
+        cedar_number: cedar_number
+      }
+      # add to address list
+      if !address_list.include? cedar_number
+        address_list[cedar_number] = []
+      end
+
+      site_id = row[site_index].to_s.strip.to_i
+      address_list[cedar_number].append({
+        site: site_id,
+        address: row.select.with_index { | value, index | address_indices.include? index }.compact.join("\n"),
+      })
       provider_list[row[cedar_index].to_s.strip] = row[supplier_index].to_s.strip.downcase
     end
 
     provider_by_name = {}
     provider_by_cedar = {}
-    p argv['sheets_and_tabs']
     argv['sheets_and_tabs'].each do | spreadsheet_filename, tabs |
       p 'Loading spreadsheet ' + spreadsheet_filename.to_s
       spreadsheet = Roo::Excelx.new spreadsheet_filename.to_s + '.xlsx'
@@ -180,7 +220,6 @@ namespace :b13 do
       end
     end
 
-
     # now convert these into a CSV
     by_cedar_csv = CSV.open('./out/provider_by_cedar_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
     list_sheets_row = ['Sheets and Tabs ➡️', '', '']
@@ -229,6 +268,17 @@ namespace :b13 do
     list_tabs_row[0] = 'Provider Name'
     by_name_csv << list_tabs_row
 
+    # general provider output
+    provider_output_csv = CSV.open('./out/general_provider_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
+    provider_output_csv << %w(name address type is_archived created_at updated_at cedar_number cedar_site)
+    provider_not_found_csv = CSV.open('./out/general_provider_not_found_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
+    provider_not_found_csv << list_sheets_row.insert(1, '', '')
+    provider_not_found_csv << list_tabs_row.insert(1, 'Probable match', 'Prediction score', 'Probable CEDAR')
+
+    # initialize fuzzy matcher
+    fuzzy_locations = FuzzyMatch.new(provider_list.values)
+    FuzzyMatch.engine = :amatch
+
     # now process provider by provider name
     provider_by_name.each do | provider_name, matches |
       row = []
@@ -242,9 +292,71 @@ namespace :b13 do
 
       # look up cedar matches
       row[2] = provider_list.key(provider_name.downcase)
+
       by_name_csv << row
+      found_provider = false
+      # filter what should appear in general output
+      #  - has entry in B13 and elsewhere and matches supplier info
+      #  - [2] has supplier info
+      #  - [3] contains a possible B13
+      #  - [4..last] contain other matches
+      if(!row[2].nil? && row[2].to_i > 0) # we have cedar
+        six_digit_cedar = row[2].nil? ? -1 : format('%06d', row[2].to_i)
+        if(!row[2].nil?) # we have supplier info - write it
+          found_provider = provider_detail[six_digit_cedar]
+        else # look for supplier info in [4..last]
+          if(row.size >= 4)
+            [4..row.size].each do | index |
+              six_digit_for_this_index = format('%06d', row[index].to_i)
+              if provider_detail.key? six_digit_for_this_index
+                found_provider = provider_detail[six_digit_for_this_index]
+              end
+            end
+          end
+        end
+      end
+      if(!found_provider)
+        if(row[3].to_i > 0)
+          # look for fuzzy
+          p 'Attempt to find fuzzy for row ' + row[0]
+
+          fuzz = fuzzy_locations.find_with_score(row[0].downcase)
+          cedar_fuzz = provider_list.key(fuzz[0])
+          p 'Found ' + fuzz[0] + ', cedar ' + cedar_fuzz
+          row.insert(1, fuzz[0], fuzz[1], cedar_fuzz)
+          provider_not_found_csv << row
+          provider_matches[:guess][provider_name] = {
+            name: row[0],
+            suggestion: row[1],
+            score: row[2],
+            cedar_number: row[3]
+          }
+        end
+      else
+        # loop through addresses
+        address_list[found_provider[:cedar_number]].each  do | address |
+          csv_row = found_provider.values
+
+          csv_row.insert(1, address[:address])
+          csv_row.append(address[:site])
+
+          provider_output_csv << csv_row
+        end
+
+        provider_matches[:exact][provider_name] = {
+          cedar_number: found_provider[:cedar_number],
+          name: found_provider[:name]
+        }
+      end
     end
+
+    File.write(
+      './out/provider_mapping.json',
+      JSON.pretty_generate(provider_matches)
+    )
     by_name_csv.close
+    provider_output_csv.close
+    provider_not_found_csv.close
   end
 
   desc 'Clean provider data - requires open refine to be running on :3333'
@@ -403,7 +515,6 @@ namespace :b13 do
     headers_done = false
     results = ActiveRecord::Base.connection.execute("SELECT * FROM elements LEFT JOIN providers ON elements.provider_id = providers.id")
     results.each do | row |
-      p row
       if !headers_done
         export_file.write row.keys
         headers_done = true
