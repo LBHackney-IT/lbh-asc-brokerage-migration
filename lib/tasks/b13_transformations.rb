@@ -154,7 +154,7 @@ class TransformProviderCedar
 			provider_index = headers.index @provider_col
 			cedar_index = headers.index @cedar_col
 
-			(1..(start_row+1).last_row).each do | rowNum |
+			((start_row+1)..sheet.last_row).each do | rowNum |
 				row = sheet.row(rowNum)
 				# check there is both provider and cedar, and cedar is numeric and over 0
 				if !(row[provider_index].nil? || row[provider_index].empty?) &&

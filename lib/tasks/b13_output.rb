@@ -1,9 +1,15 @@
 # Loads the components into a DB
 class OutputActiveRecords
-  def initialize(progress_bar:, column_mappings:, replacements:)
+  def initialize(progress_bar:,
+                 column_mappings:,
+                 replacements:,
+                 provider_clarifications:,
+                 provider_mappings:)
     @progress_bar = progress_bar
     @column_mappings = column_mappings
     @replacements = replacements
+    @provider_clarifications = provider_clarifications
+    @provider_mappings = provider_mappings
   end
 
   def write(row)
@@ -28,21 +34,48 @@ class OutputActiveRecords
             message: 'Provider matches multiple CEDAR ids - chose the first available from ' + cedar_number.join(','),
             event_type: 'import_note',
             metadata: {:cedars => cedar_number},
-            user_id: 0
+            user_id: 1
           )
         end
         cedar_number = cedar_number[0].to_i
       end
 
-      # Get the provider, if there is one provided
-      provider = Provider.find_by cedar_number: cedar_number.to_i
+      # Try getting the provider by CEDAR
+      # A lot of incoming sheets have no correct CEDAR, so if none
+      # then look up by matching string against provider_mapping['exact']
+      # and provider_clarifications[string]
+      provider = Provider.find_by(
+        cedar_number: format('%06d', cedar_number.to_i),
+        cedar_site: 0
+      )
       if !provider
-        provider = Provider.create(
-          name: row[@column_mappings[:provider]],
-          type: :spot,
-          address: '(unknown)',
-          cedar_number: cedar_number.to_i
-        )
+        provider_name = row[@column_mappings[:provider]]
+        if @provider_mappings['exact'][provider_name]
+          # we have a CEDAR from the exact matches
+          provider_mapping = @provider_mappings['exact'][provider_name]
+          provider = Provider.find_by(
+            cedar_number: format('%06d', provider_mapping['cedar_number']),
+            cedar_site: provider_mapping['sites'][0]['site']
+          )
+        else
+          cedar_number = format('%06d', @provider_clarifications[provider_name]['cedar_number'].to_i)
+          cedar_site = @provider_clarifications[provider_name]['site'].to_i
+          provider = Provider.find_by(
+            cedar_number: cedar_number,
+            cedar_site: cedar_site
+          )
+        end
+
+        if !provider
+          # log that we couldnt get provider info
+          AuditEvent.create(
+            social_care_id: row[@column_mappings[:mosaic_id]],
+            message: 'Could not locate provider from list ',
+            event_type: 'import_note',
+            metadata: {},
+            user_id: 1
+          )
+        end
       end
 
       service_group = Service.find_by name: row[@column_mappings[:service_group]]
@@ -77,9 +110,6 @@ class OutputActiveRecords
       element.element_type = element_type
 
       element.social_care_id = row[@column_mappings[:mosaic_id]].to_i
-
-      element.provider = provider
-
       element.cost 			= row[@column_mappings[:amount]] if row.key? @column_mappings[:amount]
       element.quantity 	= row[@column_mappings[:quantity]] if row.key? @column_mappings[:quantity]
 
@@ -90,11 +120,19 @@ class OutputActiveRecords
 
       element.details = 'Details'
 
-      # if row.key? 'Cycle'
-      # 	element.cycle = row['Cycle']
-      # 	element.unit = row['Unit'].downcase if row.key? 'Unit'
-      # end
-      element.save!
+      if(!provider)
+        AuditEvent.create(
+          social_care_id: row[@column_mappings[:mosaic_id]],
+          message: 'No provider when creating element',
+          event_type: 'import_note',
+          metadata: {},
+          user_id: 1
+        )
+      else
+        element.provider = provider
+        element.save!
+      end
+
       @progress_bar.increment
     end
   end
