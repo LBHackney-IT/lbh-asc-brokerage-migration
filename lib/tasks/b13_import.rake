@@ -7,7 +7,10 @@ require_relative 'progress_bar'
 require 'rake'
 require 'csv'
 require 'yaml'
+require 'fuzzy_match'
+require 'amatch'
 require_relative './refine'
+require_relative './load_providers'
 
 namespace :b13 do
   desc 'Drops the audit, element types, elements and provider tables'
@@ -106,17 +109,12 @@ namespace :b13 do
       }
     )
 
-    # load provider list
-    provider_list = {}
-    spreadsheet = Roo::Excelx.new argv['provider_info'][:file].to_s + '.xlsx'
-    sheet = spreadsheet.sheet argv['provider_info'][:tab].to_s
-    header_row_number, headers = FindHeaders.find(sheet: sheet, header_search: argv['provider_info'][:supplier])
-    supplier_index = headers.index argv['provider_info'][:supplier]
-    cedar_index = headers.index argv['provider_info'][:cedar]
-    ((header_row_number+1)..sheet.last_row).each do | rowNum |
-      row = sheet.row(rowNum)
-      provider_list[row[cedar_index].to_s.strip] = row[supplier_index].to_s.strip.downcase
-    end
+    provider_matches = {
+      exact: Hash.new,
+      guess: Hash.new
+    }
+
+    provider_list, provider_detail, address_list = LoadProviders::load(argv['provider_info']);
 
     provider_by_name = {}
     provider_by_cedar = {}
@@ -229,6 +227,17 @@ namespace :b13 do
     list_tabs_row[0] = 'Provider Name'
     by_name_csv << list_tabs_row
 
+    # general provider output
+    provider_output_csv = CSV.open('./out/general_provider_match_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
+    provider_output_csv << %w(name address type is_archived created_at updated_at cedar_number cedar_site)
+    provider_not_found_csv = CSV.open('./out/general_provider_not_found_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv', 'w')
+    provider_not_found_csv << list_sheets_row.insert(1, '', '')
+    provider_not_found_csv << list_tabs_row.insert(1, 'Probable match', 'Prediction score', 'Probable CEDAR')
+
+    # initialize fuzzy matcher
+    fuzzy_locations = FuzzyMatch.new(provider_list.values)
+    FuzzyMatch.engine = :amatch
+
     # now process provider by provider name
     provider_by_name.each do | provider_name, matches |
       row = []
@@ -243,8 +252,136 @@ namespace :b13 do
       # look up cedar matches
       row[2] = provider_list.key(provider_name.downcase)
       by_name_csv << row
+
+      found_provider = false
+      # filter what should appear in general output
+      #  - has entry in B13 and elsewhere and matches supplier info
+      #  - [2] has supplier info
+      #  - [3] contains a possible B13
+      #  - [4..last] contain other matches
+      if(!row[2].nil? && row[2].to_i > 0) # we have cedar
+        six_digit_cedar = row[2].nil? ? -1 : format('%06d', row[2].to_i)
+        if(!row[2].nil?) # we have supplier info - write it
+          found_provider = provider_detail[six_digit_cedar]
+        else # look for supplier info in [4..last]
+          if(row.size >= 4)
+            [4..row.size].each do | index |
+              six_digit_for_this_index = format('%06d', row[index].to_i)
+              if provider_detail.key? six_digit_for_this_index
+                found_provider = provider_detail[six_digit_for_this_index]
+              end
+            end
+          end
+        end
+      end
+      if(!found_provider)
+        if(row[3].to_i > 0)
+          # look for fuzzy
+          p 'Attempt to find fuzzy for row ' + row[0]
+
+          fuzz = fuzzy_locations.find_with_score(row[0].downcase)
+          cedar_fuzz = provider_list.key(fuzz[0])
+          p 'Found ' + fuzz[0] + ', cedar ' + cedar_fuzz
+          row.insert(1, fuzz[0], fuzz[1], cedar_fuzz)
+          provider_not_found_csv << row
+          provider_matches[:guess][provider_name] = {
+            name: row[0],
+            suggestion: row[1],
+            score: row[2],
+            cedar_number: row[3]
+          }
+        end
+      else
+        # loop through addresses
+        address_list[found_provider[:cedar_number]].each  do | address |
+          csv_row = found_provider.values
+
+          csv_row.insert(1, address[:address])
+          csv_row.append(address[:site])
+
+          provider_output_csv << csv_row
+        end
+
+        provider_matches[:exact][provider_name] = {
+          cedar_number: found_provider[:cedar_number],
+          name: found_provider[:name],
+          sites: address_list[found_provider[:cedar_number]]
+        }
+      end
     end
     by_name_csv.close
+  end
+
+  desc 'Process Provider clarifications from Hackney'
+  task :etl_process_provider_clarifications => :environment do | t, argv |
+    argv.with_defaults(
+      filename: 'Hackney clarifications',
+      probable_match_col: 'Probable match from Supplier list ',
+      original_provider_string_col: 'Provider Name ',
+      is_it_correct: 'Is the probable match correct?',
+      added_cedar_number: 'If no, please add (CEDAR number)',
+      added_site_id: 'If no, please add (Site ID)'
+    )
+    spreadsheet = Roo::Excelx.new argv[:filename].to_s + '.xlsx'
+    sheet = spreadsheet.sheet(0)
+    header_row_number, headers = FindHeaders.find(sheet: sheet, header_search: argv['original_provider_string_col'])
+
+    original_provider_string_col_index = headers.index argv['original_provider_string_col']
+    is_it_correct_index = headers.index argv['is_it_correct']
+    added_cedar_number_index = headers.index argv['added_cedar_number']
+    added_site_id_index = headers.index argv['added_site_id']
+    probable_match_col_index = headers.index argv['probable_match_col']
+    clarifications = Hash.new
+
+    ((header_row_number + 1)..sheet.last_row).each do | rowNum |
+      row = sheet.row(rowNum)
+      clarification_info = {}
+
+      def find_site_number(site_name, default = 0)
+        site_number = site_name.match /[\[\(](cedar)* Site (\d)?[\]\)]/i
+        if !site_number.nil? && Integer(site_number[2], exception: false)
+          return site_number[2].to_i
+        end
+        return default
+      end
+
+      # they've found it
+      if !row[is_it_correct_index].nil? && (row[is_it_correct_index].to_s.match? /yes/i)
+        # it's got a site number
+        if row[is_it_correct_index].match? /site number/i
+          clarification_info = {
+            supplier_string_match: row[probable_match_col_index],
+            site: find_site_number(row[original_provider_string_col_index], 0)
+          }
+        else
+          clarification_info = {
+            cedar_number: row[added_cedar_number_index],
+            site: row[added_site_id_index]
+          }
+        end
+      else
+        if !row[is_it_correct_index].nil? && (row[is_it_correct_index].to_s.match? /no/i)
+          site_id = row[added_site_id_index].to_i
+
+          if(site_id == 0)
+            site_id = find_site_number(
+              row[original_provider_string_col_index],
+              site_id)
+          end
+
+          clarification_info = {
+            cedar_number: row[added_cedar_number_index],
+            site: site_id
+          }
+        end
+      end
+      clarifications[row[original_provider_string_col_index]] = clarification_info
+    end
+    File.write(
+      './out/provider_clarifications_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.json',
+      JSON.pretty_generate(clarifications)
+    )
+
   end
 
   desc 'Clean provider data - requires open refine to be running on :3333'
@@ -278,9 +415,80 @@ namespace :b13 do
     clustering_instructions = File.open(File.join(Rails.root, "lib", "tasks", "operations.json")).read
     File.write(
       provider_by_name_file + '.clusters.json',
-      refine_project.call('compute-clusters', JSON.parse(clustering_instructions)).to_json
+      JSON.pretty_generate(
+        refine_project.call('compute-clusters', JSON.parse(clustering_instructions))
+      )
     )
+  end
 
+  desc 'Imports all providers from general_provider_match and general_provider_not_found into the database'
+  task :etl_import_providers_into_db => :environment do | t, argv |
+    Rake::Task["b13:etl_drop"].invoke
+
+    argv.with_defaults(
+      provider_info: {
+        file: 'Suppliers Info HA (33)',
+        tab: 'Page1_1',
+        supplier: 'supplier name',
+        cedar: 'supplier reference',
+        site: 'address number',
+        address: ['address line 1',	'address line 2', 'address line 3', 'address line 4',	'address line 5',	'address line 6',	'postcode']
+      }
+    )
+    # latest provider general list
+    # provider_match_file = Dir['./out/general_provider_match_*.csv'].last
+    provider_clarifications = JSON.parse(File.read(Dir['./out/provider_clarifications_*.json'].last))
+    provider_mapping = JSON.parse(File.read('./out/provider_mapping.json'))
+    provider_list, provider_detail, address_list = LoadProviders::load(argv['provider_info'])
+
+    provider_mapping['exact'].each do | provider_name, detail |
+      # put it in there
+      detail['sites'].each do | site |
+        cedar_number = format('%06d', detail['cedar_number'].to_i)
+        provider = Provider.find_by(
+          cedar_number: cedar_number,
+          cedar_site: site['site'].to_i
+        )
+        if !provider
+          type = provider_detail[cedar_number].fetch(:type, :spot);
+          Provider.create(
+            name: provider_name,
+            type: type,
+            address: site['address'],
+            cedar_number: detail['cedar_number'].to_i,
+            cedar_site: site['site'].to_i
+          )
+        end
+      end
+    end
+
+    provider_clarifications.each do | dirty_provider_name, clarification_detail |
+      cedar_number = clarification_detail['cedar_number']
+      if(cedar_number)
+        cedar_number = format('%06d', clarification_detail['cedar_number'].to_i)
+        site_number = clarification_detail.fetch 'site', 0
+
+        provider = Provider.find_by(
+          cedar_number: cedar_number,
+          cedar_site: site_number
+        )
+        if !provider
+          if provider_detail[cedar_number]
+            type = clarification_detail.fetch(:type, :spot);
+            address_info = address_list[cedar_number.to_i].find { |a| a[:site] == site_number }
+            Provider.create(
+              name: provider_detail[cedar_number][:name],
+              type: type,
+              address: address_info.nil? ? '(unknown)' : address_info[:address],
+              cedar_number: cedar_number,
+              cedar_site: site_number
+            )
+          else
+            # log that there was no detail for it
+          end
+        end
+      end
+    end
   end
 
   desc 'Imports all three spreadsheet types, one after another, with values being assumed to be newer'
@@ -359,6 +567,9 @@ namespace :b13 do
     rejections = OutputCSV.new(filename: argv['rejections_filename'], progress_bar: @progress_bar)
     rejections.write(['Rejections for ' + source_type])
 
+    provider_clarifications = JSON.parse(File.read(Dir['./out/provider_clarifications_*.json'].last))
+    provider_mappings = JSON.parse(File.read('./out/provider_mapping.json'))
+
     Kiba.run(
       Kiba.parse do
         @progress_bar = ProgressBar.new(total: 1, description: 'Rows imported')
@@ -389,7 +600,9 @@ namespace :b13 do
         destination OutputActiveRecords,
                     progress_bar: @progress_bar,
                     column_mappings: column_mappings,
-                    replacements: YAML.load_file('element_replacements.yml')
+                    replacements: YAML.load_file('element_replacements.yml'),
+                    provider_clarifications: provider_clarifications,
+                    provider_mappings: provider_mappings
       end
     )
     rejections.close
