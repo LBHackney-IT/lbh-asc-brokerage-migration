@@ -16,6 +16,23 @@ class OutputActiveRecords
     if !@headers_written
       @headers_written = true
     else
+      # create the service user
+      service_user = ServiceUser.find_by_social_care_id row[@column_mappings[:mosaic_id]].to_i
+      if(!service_user)
+        service_user = ServiceUser.create(
+          social_care_id: row[@column_mappings[:mosaic_id]].to_i,
+          service_user_name: row[@column_mappings[:service_user_name]],
+          date_of_birth: '1800-01-01'
+        )
+      end
+
+      if @column_mappings.key? :service_user_dob
+        if row[@column_mappings[:service_user_dob]]
+          service_user.date_of_birth = row[@column_mappings[:service_user_dob]]
+        end
+        service_user.save!
+      end
+
       # look up element to see if it exists yet
       # attempts to match by social_care_id and start_date and cost
       element = Element.find_by( {
@@ -30,7 +47,7 @@ class OutputActiveRecords
         if(cedar_number.length > 1)
           # if more than one cedar number add audit entry
           AuditEvent.create(
-            social_care_id: row[@column_mappings[:mosaic_id]],
+            social_care_id: row[@column_mappings[:mosaic_id]].to_i,
             message: 'Provider matches multiple CEDAR ids - chose the first available from ' + cedar_number.join(','),
             event_type: 'import_note',
             metadata: {:cedars => cedar_number},
@@ -58,18 +75,22 @@ class OutputActiveRecords
             cedar_site: provider_mapping['sites'][0]['site']
           )
         else
-          cedar_number = format('%06d', @provider_clarifications[provider_name]['cedar_number'].to_i)
-          cedar_site = @provider_clarifications[provider_name]['site'].to_i
-          provider = Provider.find_by(
-            cedar_number: cedar_number,
-            cedar_site: cedar_site
-          )
+          if @provider_clarifications.key? provider_name
+            cedar_number = format('%06d', @provider_clarifications[provider_name]['cedar_number'].to_i)
+            cedar_site = @provider_clarifications[provider_name]['site'].to_i
+            provider = Provider.find_by(
+              cedar_number: cedar_number,
+              cedar_site: cedar_site
+            )
+          else
+            p 'Could not find for ' + provider_name
+          end
         end
 
         if !provider
           # log that we couldnt get provider info
           AuditEvent.create(
-            social_care_id: row[@column_mappings[:mosaic_id]],
+            social_care_id: row[@column_mappings[:mosaic_id]].to_i,
             message: 'Could not locate provider from list ',
             event_type: 'import_note',
             metadata: {},
@@ -116,13 +137,13 @@ class OutputActiveRecords
       element.start_date  = row[@column_mappings[:start_date]]
       element.end_date 		= row[@column_mappings[:end_date]]
 
-      element.non_personal_budget = true
+      element.non_personal_budget = false
 
-      element.details = 'Details'
+      element.details = row[@column_mappings[:element_name]]
 
       if(!provider)
         AuditEvent.create(
-          social_care_id: row[@column_mappings[:mosaic_id]],
+          social_care_id: row[@column_mappings[:mosaic_id]].to_i,
           message: 'No provider when creating element',
           event_type: 'import_note',
           metadata: {},
