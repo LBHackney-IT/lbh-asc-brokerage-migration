@@ -1,3 +1,2 @@
 class ServiceUser < ApplicationRecord
-
 end

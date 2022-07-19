@@ -2,6 +2,7 @@ require 'csv'
 require 'roo'
 require 'bigdecimal'
 require 'active_support'
+require 'date'
 require_relative './find_headers'
 
 ### Extract ###
@@ -111,13 +112,64 @@ class TransformCleanNBSP
 	def initialize
 	end
 	def process(row)
-		row.map do |key, value|
+		row = row.map do |key, value|
 			if value.is_a? String
-				value = value.gsub(/[[:space:]]/, ' ')
+				value = value.gsub(/[[:space:]]/, ' ').squish
 			end
 			[key, value]
 		end
 		row.to_h
+	end
+end
+
+class TransformRemoveHTML
+	def initialize
+		@sanitizer = Rails::Html::LinkSanitizer.new
+	end
+	def process(row)
+		row = row.map do |key, value|
+			if value.is_a? String
+				value = @sanitizer.sanitize(value).gsub('&amp;','&')
+			end
+			[key, value]
+		end
+		row.to_h
+	end
+end
+
+class TransformDOB
+	def initialize(dob_col:, format:)
+		@dob_col = dob_col
+		@format = format
+	end
+	def process(row)
+		if(@dob_col)
+			if (!row[@dob_col].blank?)
+				dob = Date.parse(row[@dob_col], @format) rescue false
+				row[@dob_col] = dob
+			end
+		end
+		row
+	end
+end
+
+class TransformServiceUsername
+	def initialize(service_user_name_col:, format: )
+		@service_user_name_col = service_user_name_col
+		@format = format
+	end
+	def process(row)
+		if (!row[@service_user_name_col].blank?)
+			case @format
+			when 'l,f'
+				last, first = row[@service_user_name_col].split(/,/).map(&:strip)
+				row[@service_user_name_col] = (first ? first : '') + " " + (last ? last : '')
+			when 'f l'
+				# do nothing - this is good format
+			end
+		end
+		p row
+		row
 	end
 end
 
@@ -189,6 +241,18 @@ class TransformElementCostType
 			row[@cycle_col] = 'one_off'
 		when 'weekly', 'week'
 			row[@cycle_col] = 'weekly'
+		end
+		row
+	end
+end
+
+class TransformCostToPositive
+	def initialize(cost_col:)
+		@cost_col = cost_col
+	end
+	def process(row)
+		if row.has_key?(@cost_col) && row[@cost_col].is_a?(Numeric) && (row[@cost_col] < 0)
+			row[@cost_col] = row[@cost_col] * -1
 		end
 		row
 	end

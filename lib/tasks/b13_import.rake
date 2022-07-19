@@ -535,7 +535,9 @@ namespace :b13 do
         quantity:       'Qty',
         start_date:     'Start Date',
         end_date:       'End Date',
-        element_name:   'Element'
+        element_name:   'Element',
+        service_user_name: 'Service User',
+        service_user_name_format: 'l,f'
       }
 
       default_values = {
@@ -562,7 +564,11 @@ namespace :b13 do
         quantity:       'Qty', # ??
         start_date:     'Start Date',
         end_date:       "End Date \n(6 WEEKS Hosp/Enter Manually)",
-        details:        "Care Package Description"
+        details:        "Care Package Description",
+        service_user_name: 'Name',
+        service_user_name_format: 'f l',
+        service_user_dob: 'DOB.',
+        service_user_dob_format: '%d/%m/%Y'
       }
 
       default_values = {}
@@ -590,8 +596,11 @@ namespace :b13 do
                progress_bar: @progress_bar,
                rejections: rejections
         transform TransformCleanNBSP
+        transform TransformRemoveHTML
         transform TransformRejectIfMosaicNotInt, mosaic_col: argv[:header_search], rejections: @rejections
         transform TransformCleanUnits
+
+        transform TransformCostToPositive, cost_col: column_mappings[:amount]
         transform TransformElementFNCC
         transform TransformProviderCedar,
                   spreadsheet: spreadsheet,
@@ -601,6 +610,10 @@ namespace :b13 do
                   provider_col: column_mappings[:provider]
         transform TransformElementCostType
         transform TransformRejectParseCostCentre, rejections: rejections
+
+        transform TransformServiceUsername, service_user_name_col: column_mappings[:service_user_name], format: column_mappings[:service_user_name_format]
+
+        transform TransformDOB, dob_col: column_mappings[:service_user_dob], format: column_mappings[:service_user_dob_format]
 
         transform TransformAddDefaults,
                   default_values: default_values
