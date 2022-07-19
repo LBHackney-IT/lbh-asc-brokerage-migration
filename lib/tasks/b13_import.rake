@@ -13,12 +13,25 @@ require_relative './refine'
 require_relative './load_providers'
 
 namespace :b13 do
+  desc 'Run all tasks'
+  task :etl_all_tasks => :environment do | t, argv |
+    Rake::Task["b13:etl_drop"].invoke
+    Rake::Task["b13:import_cleaned_element_names"].invoke
+    Rake::Task["b13:etl_provider"].invoke
+    Rake::Task['b13:etl_process_provider_clarifications'].invoke
+    # Rake::Task['b13:etl_find_provider_clusters'].invoke
+    Rake::Task['b13:etl_import_providers_into_db'].invoke
+    Rake::Task['b13:etl_import_all_elements'].invoke
+    Rake::Task['b13:etl_export_csv'].invoke
+  end
+
   desc 'Drops the audit, element types, elements and provider tables'
   task :etl_drop => :environment do | t, argv |
     AuditEvent.delete_all
     Element.delete_all
     Provider.delete_all
     ElementType.delete_all
+    ServiceUser.delete_all
   end
 
   desc 'Import the cleaned element names and produce a YAML file'
@@ -60,8 +73,8 @@ namespace :b13 do
   task :etl_provider => :environment do | t, argv |
     argv.with_defaults(
       provider_info: {
-        file: 'Suppliers Info HA (33)',
-        tab: 'Page1_1',
+        file: 'Commercial Adult Social Care Suppliers as of 15.07.22',
+        tab: 'Commercial ASC Suppliers',
         supplier: 'supplier name',
         cedar: 'supplier reference',
         site: 'address number',
@@ -431,12 +444,10 @@ namespace :b13 do
 
   desc 'Imports all providers from general_provider_match and general_provider_not_found into the database'
   task :etl_import_providers_into_db => :environment do | t, argv |
-    Rake::Task["b13:etl_drop"].invoke
-
     argv.with_defaults(
       provider_info: {
-        file: 'Suppliers Info HA (33)',
-        tab: 'Page1_1',
+        file: 'Commercial Adult Social Care Suppliers as of 15.07.22',
+        tab: 'Commercial ASC Suppliers',
         supplier: 'supplier name',
         cedar: 'supplier reference',
         site: 'address number',
@@ -500,15 +511,15 @@ namespace :b13 do
   end
 
   desc 'Imports all three spreadsheet types, one after another, with values being assumed to be newer'
-  task :etl_all => :environment do | t, argv |
+  task :etl_import_all_elements => :environment do | t, argv |
     ['b13_historic', 'mosaic_historic'].each do |source_type|
-      Rake::Task["b13:etl"].invoke source_type
-      Rake::Task['b13:etl'].reenable
+      Rake::Task["b13:etl_import_from_source"].invoke source_type
+      Rake::Task['b13:etl_import_from_source'].reenable
     end
   end
 
   desc 'Imports a spreadsheet file'
-  task :etl, [:source_type] => :environment do | t, argv |
+  task :etl_import_from_source, [:source_type] => :environment do | t, argv |
     source_type = argv['source_type'] || nil
 
     case source_type
@@ -535,9 +546,11 @@ namespace :b13 do
         quantity:       'Qty',
         start_date:     'Start Date',
         end_date:       'End Date',
+        _date_formats:  '%d/%m/%Y',
         element_name:   'Element',
+        cost_code:      'Budget/Subjective Code',
         service_user_name: 'Service User',
-        service_user_name_format: 'l,f'
+        _service_user_name_format: 'l,f'
       }
 
       default_values = {
@@ -548,30 +561,35 @@ namespace :b13 do
       argv.with_defaults(
          filename: '25 May Mosaic Brokerage - Duty.xlsx',
          sheet: 'AuthorisationCompleted-22-05-22',
-         header_search: 'Type of Referral',
+         header_search: 'Mosaic No',
          rejections_filename: './out/rejections_mosaic_' + Time.now.strftime("%d-%m-%Y.%H.%M.%S") + '.csv'
       )
 
       # declare columns
       column_mappings = {
         provider:       'Care Provider',
-        cedar:          'CEDAR number (Supplier Id)', # this doesn't exist, needs to pass down from first spreadsheet
+        cedar:          'CEDAR NO. ', # this doesn't exist, needs to pass down from first spreadsheet
         service_group:  'Type of POC',
-        service_type:   'Service Type', # these needs to be mapped to that element spreadsheet
+        service_type:   'Type of POC', # these needs to be mapped to that element spreadsheet
         cycle:          'Cycle',
         mosaic_id:      'Mosaic No',
         amount:         "Amount \nFULL WEEK/TODATE\nWeeks Owed £\n",
         quantity:       'Qty', # ??
         start_date:     'Start Date',
         end_date:       "End Date \n(6 WEEKS Hosp/Enter Manually)",
-        details:        "Care Package Description",
-        service_user_name: 'Name',
-        service_user_name_format: 'f l',
-        service_user_dob: 'DOB.',
-        service_user_dob_format: '%d/%m/%Y'
+        _date_formats:  '%d/%m/%Y',
+        element_name:   'Type of POC',
+        cost_code:      "Budget Code",
+        details:        "Comment",
+        service_user_name: 'Name ',
+        _service_user_name_format: 'f l',
+        service_user_dob: 'DOB. ',
+        service_user_dob_format: '%a, %d %b %Y'
       }
 
-      default_values = {}
+      default_values = {
+        "Cycle": 'weekly'
+      }
     else
       abort 'Wrong source type given. Supported: b13_historic, mosaic_historic'
     end
@@ -595,6 +613,9 @@ namespace :b13 do
                header_search: argv[:header_search],
                progress_bar: @progress_bar,
                rejections: rejections
+
+        transform TransformAddDefaults, default_values: default_values
+
         transform TransformCleanNBSP
         transform TransformRemoveHTML
         transform TransformRejectIfMosaicNotInt, mosaic_col: argv[:header_search], rejections: @rejections
@@ -602,6 +623,11 @@ namespace :b13 do
 
         transform TransformCostToPositive, cost_col: column_mappings[:amount]
         transform TransformElementFNCC
+        transform TransformStartEndDate,
+                  rejections: rejections,
+                  start_col: column_mappings[:start_date],
+                  end_col: column_mappings[:end_date],
+                  format: column_mappings[:_date_format]
         transform TransformProviderCedar,
                   spreadsheet: spreadsheet,
                   sheet: sheet,
@@ -609,14 +635,11 @@ namespace :b13 do
                   cedar_col: column_mappings[:cedar],
                   provider_col: column_mappings[:provider]
         transform TransformElementCostType
-        transform TransformRejectParseCostCentre, rejections: rejections
+        transform TransformRejectParseCostCentre, rejections: rejections, cost_code_col: argv[:cost_code]
 
-        transform TransformServiceUsername, service_user_name_col: column_mappings[:service_user_name], format: column_mappings[:service_user_name_format]
+        transform TransformServiceUsername, service_user_name_col: column_mappings[:service_user_name], format: column_mappings[:_service_user_name_format]
 
         transform TransformDOB, dob_col: column_mappings[:service_user_dob], format: column_mappings[:service_user_dob_format]
-
-        transform TransformAddDefaults,
-                  default_values: default_values
 
         destination OutputActiveRecords,
                     progress_bar: @progress_bar,

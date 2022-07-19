@@ -31,6 +31,7 @@ class B13SourceSpreadsheet
 
 		((start_row + 1)..sheet.last_row).each do | rowNum |
 			row = sheet.row(rowNum)
+
 			# map the headers array into a hash of the row results
 			row_hash = Hash.new
 			headers.each_with_index { | header, col |
@@ -64,7 +65,6 @@ class TransformRejectIfMosaicNotInt
 					return row
 				else
 					@rejections.write row.merge({ reason: 'Rejected as mosaic not int'})
-
 					return nil
 				end
 			end
@@ -103,6 +103,30 @@ class TransformElementFNCC
 	end
 	def process(row)
 
+		row
+	end
+end
+
+class TransformStartEndDate
+	def initialize(rejections:, start_col:, end_col:, format:)
+		@rejections = rejections
+		@start_col = start_col
+		@end_col = end_col
+		@format = format
+	end
+	def process(row)
+
+		if(!row[@start_col].is_a? Date)
+			row[@start_col] = Date.parse(row[@start_col], @format) rescue nil
+		end
+		if(!row[@end_col].is_a? Date)
+			row[@end_col]   = Date.parse(row[@end_col], @format) rescue nil
+		end
+
+		if(row[@start_col].nil?)
+			@rejections.write row.merge({reason: 'No start date given'})
+			return nil
+		end
 		row
 	end
 end
@@ -168,7 +192,6 @@ class TransformServiceUsername
 				# do nothing - this is good format
 			end
 		end
-		p row
 		row
 	end
 end
@@ -259,32 +282,34 @@ class TransformCostToPositive
 end
 
 class TransformRejectParseCostCentre
-	def initialize(rejections:)
+	def initialize(rejections:, cost_code_col:)
 		@rejections = rejections
+		@cost_code_col = cost_code_col
 	end
 	def process(row)
-		cost_code = row['Budget/Subjective Code']
-		if cost_code
-			# remove any double dashes at the start
-			cost_code = cost_code.sub(/^--/, '')
-
-			# there is no cost centre given
-			if(cost_code.start_with? '--')
-				cost_code_parts = cost_code.split('-')
-				row[:cost_centre] = nil
-				row[:cost_subjective] = cost_code_parts[0] || ''
-				row[:cost_analysis] = cost_code_parts[1] || ''
-			else # default format
-				cost_code_parts = cost_code.split('-')
-				row[:cost_centre] = cost_code_parts[0] || ''
-				row[:cost_subjective] = cost_code_parts[1] || ''
-				row[:cost_analysis] = cost_code_parts[2] || ''
-				return row
-			end
-		end
-		# we don't want anything without a cost code
-		@rejections.write row.merge({reason: 'Rejected parse cost centre'})
-		nil
+		# cost_code = row[@cost_code_col]
+		# if cost_code
+		# 	# remove any double dashes at the start
+		# 	cost_code = cost_code.sub(/^--/, '')
+		#
+		# 	# there is no cost centre given
+		# 	if(cost_code.start_with? '--')
+		# 		cost_code_parts = cost_code.split('-')
+		# 		row[:cost_centre] = nil
+		# 		row[:cost_subjective] = cost_code_parts[0] || ''
+		# 		row[:cost_analysis] = cost_code_parts[1] || ''
+		# 	else # default format
+		# 		cost_code_parts = cost_code.split('-')
+		# 		row[:cost_centre] = cost_code_parts[0] || ''
+		# 		row[:cost_subjective] = cost_code_parts[1] || ''
+		# 		row[:cost_analysis] = cost_code_parts[2] || ''
+		# 		return row
+		# 	end
+		# end
+		# # we don't want anything without a cost code
+		# @rejections.write row.merge({reason: 'Rejected parse cost centre'})
+		# nil
+		row
 	end
 end
 
@@ -295,7 +320,7 @@ class TransformAddDefaults
 	def process(row)
 		@default_values.each do | default_name, default_value |
 			if !row.has_key? default_name
-				row[default_name] = default_value
+				row[default_name.to_s] = default_value
 			end
 		end
 		row

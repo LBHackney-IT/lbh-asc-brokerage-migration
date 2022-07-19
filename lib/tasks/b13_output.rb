@@ -83,7 +83,6 @@ class OutputActiveRecords
               cedar_site: cedar_site
             )
           else
-            p 'Could not find for ' + provider_name
           end
         end
 
@@ -149,6 +148,7 @@ class OutputActiveRecords
           metadata: {},
           user_id: 1
         )
+        element.save!
       else
         element.provider = provider
         element.save!
